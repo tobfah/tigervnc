@@ -1,4 +1,4 @@
-/* Copyright 2025 Adam Halim for Cendio AB
+/* Copyright 2026 Adam Halim for Cendio AB
  *
  * This is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,28 +37,39 @@
 #include "objects/Output.h"
 #include "objects/Display.h"
 #include "objects/ScreencopyManager.h"
+#include "objects/ImageCaptureSource.h"
 #include "WaylandPixelBuffer.h"
 
 static core::LogWriter vlog("WaylandPixelBuffer");
 
-WaylandPixelBuffer::WaylandPixelBuffer(wayland::Display* display,
+WaylandPixelBuffer::WaylandPixelBuffer(wayland::Display* display_,
                                        wayland::Output* output_,
                                        rfb::VNCServer* server_,
                                        std::function<void()> desktopReadyCallback_)
   : firstFrame(true), desktopReadyCallback(desktopReadyCallback_),
-    server(server_), output(output_), resized(false)
+    server(server_), display(display_), output(output_),
+    outputImageCaptureSourceManager(nullptr), imageCaptureSource(nullptr),
+    resized(false)
 {
   std::function<void(uint8_t*, core::Region, rfb::PixelFormat)> bufferEventCb =
     std::bind(&WaylandPixelBuffer::bufferEvent, this, std::placeholders::_1,
               std::placeholders::_2, std::placeholders::_3);
 
-  screencopyManager = new wayland::ScreencopyManager(display, output_,
+  if (display_->interfaceAvailable("ext_output_image_capture_source_manager_v1")) {
+    outputImageCaptureSourceManager =
+      new wayland::OutputImageCaptureSourceManager(display_);
+    imageCaptureSource = outputImageCaptureSourceManager->createSource(output_);
+  }
+
+  screencopyManager = new wayland::ScreencopyManager(display_, output_,
                                                      bufferEventCb);
 }
 
 WaylandPixelBuffer::~WaylandPixelBuffer()
 {
   delete screencopyManager;
+  delete imageCaptureSource;
+  delete outputImageCaptureSourceManager;
 }
 
 void WaylandPixelBuffer::bufferEvent(uint8_t* buffer, core::Region damage, rfb::PixelFormat pf)
