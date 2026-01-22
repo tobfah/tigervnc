@@ -22,6 +22,7 @@ add_executable(w0vncserver
   wayland/objects/VirtualPointer.cxx
   wayland/objects/VirtualKeyboard.cxx
   wayland/objects/ImageCaptureSource.cxx
+  wayland/objects/ImageCopyCaptureManager.cxx
   wayland/objects/ScreencopyManager.cxx
   wayland/WaylandDesktop.cxx
   wayland/WaylandPixelBuffer.cxx
@@ -42,6 +43,7 @@ set(GEN_WAYLAND_SRCS "")
 set(WAYLAND_PROTOCOLS
   ext-foreign-toplevel-list-v1
   ext-image-capture-source-v1
+  ext-image-copy-capture-v1
   wlr-screencopy-unstable-v1
   wlr-virtual-pointer-unstable-v1
   virtual-keyboard-unstable-v1
