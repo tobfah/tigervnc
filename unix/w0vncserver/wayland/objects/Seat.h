@@ -25,6 +25,7 @@
 
 struct wl_seat;
 struct wl_seat_listener;
+struct wl_pointer;
 
 namespace wayland {
   class Display;
@@ -37,6 +38,7 @@ namespace wayland {
 
     wl_seat* getSeat() const { return seat; }
     Keyboard* getKeyboard() const { return keyboard; }
+    wl_pointer* getPointer() const { return pointer; }
 
   private:
     void seatCapabilities(uint32_t capabilities);
@@ -45,6 +47,7 @@ namespace wayland {
     wl_seat* seat;
     Display* display;
     Keyboard* keyboard;
+    wl_pointer* pointer;
     static const wl_seat_listener listener;
     std::function<void(unsigned int)> setLEDstate;
   };

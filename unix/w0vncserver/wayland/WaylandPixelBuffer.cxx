@@ -21,8 +21,9 @@
 #endif
 
 #include <assert.h>
-#include <stdexcept>
 #include <unistd.h>
+#include <vector>
+#include <stdexcept>
 
 #include <pixman.h>
 #include <wayland-client-core.h>
@@ -31,38 +32,78 @@
 
 #include <core/Region.h>
 #include <core/LogWriter.h>
+#include <core/Rect.h>
+#include <core/string.h>
 #include <rfb/VNCServerST.h>
 
+#include "../parameters.h"
 #include "../w0vncserver.h"
 #include "objects/Output.h"
 #include "objects/Display.h"
+#include "objects/Seat.h"
 #include "objects/ScreencopyManager.h"
 #include "objects/ImageCaptureSource.h"
+#include "objects/ImageCopyCaptureManager.h"
 #include "WaylandPixelBuffer.h"
 
 static core::LogWriter vlog("WaylandPixelBuffer");
 
 WaylandPixelBuffer::WaylandPixelBuffer(wayland::Display* display_,
                                        wayland::Output* output_,
+                                       wayland::Seat* seat_,
                                        rfb::VNCServer* server_,
                                        std::function<void()> desktopReadyCallback_)
   : firstFrame(true), desktopReadyCallback(desktopReadyCallback_),
     server(server_), display(display_), output(output_),
-    outputImageCaptureSourceManager(nullptr), imageCaptureSource(nullptr),
+    screencopyManager(nullptr), outputImageCaptureSourceManager(nullptr),
+    imageCaptureSource(nullptr), imageCopyCaptureManager(nullptr),
     resized(false)
 {
-  std::function<void(uint8_t*, core::Region, rfb::PixelFormat)> bufferEventCb =
-    std::bind(&WaylandPixelBuffer::bufferEvent, this, std::placeholders::_1,
-              std::placeholders::_2, std::placeholders::_3);
+  std::function<void(uint8_t*, core::Region, rfb::PixelFormat)> copyCb =
+    std::bind(&WaylandPixelBuffer::bufferEvent, this,
+              std::placeholders::_1, std::placeholders::_2,
+              std::placeholders::_3);
+  std::function<void(uint8_t*, core::Region, uint32_t)> imageCopyCb =
+    std::bind(&WaylandPixelBuffer::imageCopyBufferEvent, this,
+              std::placeholders::_1, std::placeholders::_2,
+              std::placeholders::_3);
+  std::function<bool(const std::vector<uint32_t>&, uint32_t*)>
+    imageCopyPickFormatCb =
+    std::bind(&WaylandPixelBuffer::pickShmFormat, this,
+              std::placeholders::_1, std::placeholders::_2);
+  std::function<void(int, int, const core::Point&, uint32_t, const uint8_t*)>
+    cursorImageCb =
+    std::bind(&WaylandPixelBuffer::cursorImageEvent, this,
+              std::placeholders::_1, std::placeholders::_2,
+              std::placeholders::_3, std::placeholders::_4,
+              std::placeholders::_5);
+  std::function<void(const core::Point&)> cursorPosCb =
+    std::bind(&WaylandPixelBuffer::cursorPosEvent, this,
+              std::placeholders::_1);
+  std::function<void()> stoppedCb = [this]() {
+    server->closeClients("The remote session stopped");
+  };
 
-  if (display_->interfaceAvailable("ext_output_image_capture_source_manager_v1")) {
+  if (display_->interfaceAvailable("ext_image_copy_capture_manager_v1") &&
+      display_->interfaceAvailable("ext_output_image_capture_source_manager_v1")) {
+    vlog.debug("ImageCopyCaptureManager enabled");
     outputImageCaptureSourceManager =
       new wayland::OutputImageCaptureSourceManager(display_);
     imageCaptureSource = outputImageCaptureSourceManager->createSource(output_);
-  }
 
-  screencopyManager = new wayland::ScreencopyManager(display_, output_,
-                                                     bufferEventCb);
+    imageCopyCaptureManager = new wayland::ImageCopyCaptureManager(
+      display_, imageCaptureSource->getSource(), seat_->getPointer(),
+      imageCopyCb, imageCopyPickFormatCb,
+      cursorImageCb, cursorPosCb, stoppedCb);
+
+    imageCopyCaptureManager->createSession();
+    imageCopyCaptureManager->createPointerCursorSession();
+
+  } else {
+    vlog.debug("ScreencopyManager enabled");
+    screencopyManager = new wayland::ScreencopyManager(display_, output_,
+                                                       copyCb);
+  }
 }
 
 WaylandPixelBuffer::~WaylandPixelBuffer()
@@ -70,17 +111,214 @@ WaylandPixelBuffer::~WaylandPixelBuffer()
   delete screencopyManager;
   delete imageCaptureSource;
   delete outputImageCaptureSourceManager;
+  delete imageCopyCaptureManager;
 }
 
-void WaylandPixelBuffer::bufferEvent(uint8_t* buffer, core::Region damage, rfb::PixelFormat pf)
+void WaylandPixelBuffer::convertCursorBuffer(const uint8_t* src,
+                                             uint32_t format_,
+                                             uint32_t width,
+                                             uint32_t height,
+                                             std::vector<uint8_t>& out)
+{
+  const uint8_t* in;
+  uint8_t* outp;
+  bool hasAlpha;
+
+  if (!src || !width || !height) {
+    out.clear();
+    return;
+  }
+
+  out.resize(width * height * 4);
+  in = src;
+  outp = out.data();
+
+  if (format_ == 0)
+    format_ = WL_SHM_FORMAT_ARGB8888;
+
+  hasAlpha = (format_ == WL_SHM_FORMAT_ARGB8888 ||
+              format_ == WL_SHM_FORMAT_RGBA8888 ||
+              format_ == WL_SHM_FORMAT_ABGR8888);
+
+  for (uint32_t y = 0; y < height; y++) {
+    for (uint32_t x = 0; x < width; x++) {
+      uint8_t r, g, b, a;
+
+      switch (format_) {
+        case WL_SHM_FORMAT_ARGB8888:
+          b = in[0];
+          g = in[1];
+          r = in[2];
+          a = in[3];
+          break;
+        case WL_SHM_FORMAT_XRGB8888:
+          b = in[0];
+          g = in[1];
+          r = in[2];
+          a = 0xff;
+          break;
+        case WL_SHM_FORMAT_RGBA8888:
+          r = in[0];
+          g = in[1];
+          b = in[2];
+          a = in[3];
+          break;
+        case WL_SHM_FORMAT_RGBX8888:
+          r = in[0];
+          g = in[1];
+          b = in[2];
+          a = 0xff;
+          break;
+        case WL_SHM_FORMAT_ABGR8888:
+          a = in[0];
+          b = in[1];
+          g = in[2];
+          r = in[3];
+          break;
+        case WL_SHM_FORMAT_XBGR8888:
+          b = in[1];
+          g = in[2];
+          r = in[3];
+          a = 0xff;
+          break;
+        default:
+          r = g = b = 0;
+          a = 0xff;
+          break;
+      }
+
+      if (hasAlpha) {
+        if (a == 0) {
+          r = g = b = 0;
+        } else {
+          r = (uint8_t)((uint16_t)r * 255 / a);
+          g = (uint8_t)((uint16_t)g * 255 / a);
+          b = (uint8_t)((uint16_t)b * 255 / a);
+        }
+      }
+
+      *outp++ = r;
+      *outp++ = g;
+      *outp++ = b;
+      *outp++ = a;
+
+      in += 4;
+    }
+  }
+}
+
+void WaylandPixelBuffer::imageCopyBufferEvent(uint8_t* buffer,
+                                              core::Region damage,
+                                              uint32_t shmFormat)
+{
+  rfb::PixelFormat pf;
+
+  try {
+    pf = convertFormat(shmFormat);
+  } catch (std::exception& e) {
+    vlog.error("WaylandPixelBuffer::imageCopyBufferEvent: %s", e.what());
+    return;
+  }
+
+  bufferEvent(buffer, damage, pf);
+}
+
+void WaylandPixelBuffer::cursorImageEvent(int width, int height,
+                                          const core::Point& hotspot,
+                                          uint32_t shmFormat,
+                                          const uint8_t* src)
+{
+  assert(server);
+
+  std::vector<uint8_t> cursorData;
+  convertCursorBuffer(src, shmFormat, width, height, cursorData);
+  if (cursorData.empty())
+    return;
+
+  try {
+    server->setCursor(width, height, hotspot, cursorData.data());
+  } catch (std::exception& e) {
+    vlog.error("WaylandPixelBuffer::cursorImageEvent: %s", e.what());
+  }
+}
+
+void WaylandPixelBuffer::cursorPosEvent(const core::Point& pos)
+{
+  if (!server)
+    return;
+  server->setCursorPos(pos, true);
+}
+
+rfb::PixelFormat WaylandPixelBuffer::convertFormat(uint32_t shmFormat)
+{
+  switch (shmFormat) {
+    case WL_SHM_FORMAT_XRGB8888:
+    case WL_SHM_FORMAT_ARGB8888:
+      return rfb::PixelFormat(32, 24, false, true, 255, 255, 255,
+                              16, 8, 0);
+    case WL_SHM_FORMAT_RGBX8888:
+    case WL_SHM_FORMAT_RGBA8888:
+      return rfb::PixelFormat(32, 24, false, true, 255, 255, 255,
+                              24, 16, 8);
+    case WL_SHM_FORMAT_XBGR8888:
+    case WL_SHM_FORMAT_ABGR8888:
+      return rfb::PixelFormat(32, 24, false, true, 255, 255, 255,
+                              0, 8, 16);
+    default:
+      throw std::runtime_error(core::format("format %d not supported",
+                                            shmFormat));
+  }
+}
+
+bool WaylandPixelBuffer::pickShmFormat(const std::vector<uint32_t>& list,
+                                       uint32_t* out)
+{
+  for (uint32_t shmFormat : list) {
+    if (shmFormat == 0) {
+      if (out)
+        *out = WL_SHM_FORMAT_ARGB8888;
+      return true;
+    }
+
+    switch (shmFormat) {
+      case WL_SHM_FORMAT_ARGB8888:
+      case WL_SHM_FORMAT_RGBA8888:
+      case WL_SHM_FORMAT_ABGR8888:
+        if (out)
+          *out = shmFormat;
+        return true;
+      default:
+        switch (shmFormat) {
+          case WL_SHM_FORMAT_XRGB8888:
+          case WL_SHM_FORMAT_RGBX8888:
+          case WL_SHM_FORMAT_XBGR8888:
+            if (out)
+              *out = shmFormat;
+            return true;
+          default:
+            break;
+        }
+        break;
+    }
+  }
+
+  return false;
+}
+
+void WaylandPixelBuffer::bufferEvent(uint8_t* buffer, core::Region damage,
+                                     rfb::PixelFormat pf)
 {
   if (output->getWidth() != (uint32_t)width() ||
       output->getHeight() != (uint32_t)height()) {
     if (!firstFrame && !resized) {
-      vlog.debug("Detected resize, calling resize()");
-      screencopyManager->resize();
-      resized = true;
-      return;
+      if (!screencopyManager) {
+        resized = true;
+      } else {
+        vlog.debug("Detected resize, calling resize()");
+        screencopyManager->resize();
+        resized = true;
+        return;
+      }
     }
   }
 

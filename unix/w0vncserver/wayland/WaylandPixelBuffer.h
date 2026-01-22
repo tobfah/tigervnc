@@ -20,6 +20,7 @@
 #define __WAYLAND_PIXELBUFFER_H__
 
 #include <functional>
+#include <vector>
 
 #include <rfb/PixelBuffer.h>
 
@@ -31,12 +32,14 @@ namespace wayland {
   class ScreencopyManager;
   class OutputImageCaptureSourceManager;
   class ImageCaptureSource;
+  class Seat;
+  class ImageCopyCaptureManager;
 };
 
 class WaylandPixelBuffer : public rfb::ManagedPixelBuffer {
 public:
   WaylandPixelBuffer(wayland::Display* display, wayland::Output* output,
-                     rfb::VNCServer* server,
+                     wayland::Seat* seat, rfb::VNCServer* server,
                      std::function<void()> desktopReadyCallback);
   ~WaylandPixelBuffer();
 
@@ -45,6 +48,17 @@ protected:
   void bufferEvent(uint8_t* buffer, core::Region damage, rfb::PixelFormat pf);
 
 private:
+  void imageCopyBufferEvent(uint8_t* buffer, core::Region damage,
+                            uint32_t shmFormat);
+  void cursorImageEvent(int width, int height, const core::Point& hotspot,
+                        uint32_t shmFormat, const uint8_t* src);
+  void cursorPosEvent(const core::Point& pos);
+  rfb::PixelFormat convertFormat(uint32_t shmFormat);
+  bool pickShmFormat(const std::vector<uint32_t>& formats, uint32_t* out);
+  void convertCursorBuffer(const uint8_t* src, uint32_t format,
+                           uint32_t width, uint32_t height,
+                           std::vector<uint8_t>& out);
+
   // Sync the shadow framebuffer to the actual framebuffer
   void syncBuffers(uint8_t* buffer, core::Region damage);
 
@@ -57,6 +71,7 @@ private:
   wayland::ScreencopyManager* screencopyManager;
   wayland::OutputImageCaptureSourceManager* outputImageCaptureSourceManager;
   wayland::ImageCaptureSource* imageCaptureSource;
+  wayland::ImageCopyCaptureManager* imageCopyCaptureManager;
   bool resized;
 };
 
