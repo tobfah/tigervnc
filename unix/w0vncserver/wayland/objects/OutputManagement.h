@@ -23,6 +23,7 @@
 
 #include <string>
 #include <vector>
+#include <functional>
 
 #include <wayland-client-core.h>
 
@@ -128,6 +129,9 @@ namespace wayland {
     void apply();
     void test();
     Status getStatus() const { return status; }
+    void setCompletionCallback(std::function<void(Status)> callback) {
+      onComplete = std::move(callback);
+    }
 
   private:
     static const zwlr_output_configuration_v1_listener listener;
@@ -135,6 +139,7 @@ namespace wayland {
     zwlr_output_configuration_v1* config;
     std::vector<OutputConfigurationHead*> heads;
     Status status;
+    std::function<void(Status)> onComplete;
   };
 
   class OutputManager : public Object {
@@ -146,6 +151,9 @@ namespace wayland {
     const std::vector<OutputHead*>& getHeads() const { return heads; }
     uint32_t getLastSerial() const { return lastSerial; }
     bool isReady() const { return ready; }
+    void setReadyCallback(std::function<void()> callback) {
+      onReady = std::move(callback);
+    }
 
   private:
     static const zwlr_output_manager_v1_listener listener;
@@ -154,6 +162,7 @@ namespace wayland {
     std::vector<OutputHead*> heads;
     uint32_t lastSerial;
     bool ready;
+    std::function<void()> onReady;
   };
 };
 

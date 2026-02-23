@@ -218,16 +218,22 @@ const zwlr_output_configuration_v1_listener OutputConfiguration::listener = {
     OutputConfiguration* config = static_cast<OutputConfiguration*>(data);
     config->status = OutputConfiguration::Succeeded;
     vlog.debug("Output configuration succeeded");
+    if (config->onComplete)
+      config->onComplete(config->status);
   },
   .failed = [](void* data, zwlr_output_configuration_v1*) {
     OutputConfiguration* config = static_cast<OutputConfiguration*>(data);
     config->status = OutputConfiguration::Failed;
     vlog.debug("Output configuration failed");
+    if (config->onComplete)
+      config->onComplete(config->status);
   },
   .cancelled = [](void* data, zwlr_output_configuration_v1*) {
     OutputConfiguration* config = static_cast<OutputConfiguration*>(data);
     config->status = OutputConfiguration::Cancelled;
     vlog.debug("Output configuration cancelled");
+    if (config->onComplete)
+      config->onComplete(config->status);
   },
 };
 
@@ -297,7 +303,11 @@ const zwlr_output_manager_v1_listener OutputManager::listener = {
   .done = [](void* data, zwlr_output_manager_v1*, uint32_t serial) {
     OutputManager* manager = static_cast<OutputManager*>(data);
     manager->lastSerial = serial;
-    manager->ready = true;
+    if (!manager->ready) {
+      manager->ready = true;
+      if (manager->onReady)
+        manager->onReady();
+    }
   },
   .finished = [](void* data, zwlr_output_manager_v1*) {
     OutputManager* manager = static_cast<OutputManager*>(data);
